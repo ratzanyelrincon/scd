@@ -1,0 +1,291 @@
+---
+title: "Introduction to Synthetic Control with Differencing"
+author: "Chun Pang Chow, Ratzanyel Rincón, and Kyungchul Song"
+date: "`r Sys.Date()`"
+output:
+  rmarkdown::html_vignette:
+    toc: true
+    toc_depth: 3
+vignette: >
+  %\VignetteIndexEntry{Introduction to Synthetic Control with Differencing}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  fig.width = 7,
+  fig.height = 5,
+  eval = FALSE,
+  message = FALSE,
+  warning = FALSE
+)
+```
+
+## Overview
+
+The **scd** package implements the Synthetic Control with Differencing (SCD) method for estimating average treatment effects on the treated (ATT) in settings with one treated group and multiple untreated donor groups observed over time. The method, proposed in Rincón and Song (2025), provides asymptotically valid uniform confidence intervals under a **Generalized Matching Condition (GMC)**, which relaxes the parallel trends assumption required by standard difference-in-differences.
+
+### When to Use SCD
+
+SCD is particularly useful when:
+
+1. **Parallel trends may not hold** — The treated unit may have had different trends than donors even absent treatment
+2. **You have repeated cross-sections or short panels** — Individual-level data need not be tracked over time
+3. **Multiple large donor groups are available** — SCD leverages group-level variation rather than aggregate time series
+4. **You want uniform inference** — Confidence bands are valid simultaneously across all post-treatment periods (or all periods if `post_treatment_only = FALSE`)
+
+## Installation and Setup
+
+```{r install, eval = FALSE}
+# Development version from GitHub
+# install.packages("devtools")
+devtools::install_github("whereisalexchow/scd")
+```
+
+```{r load}
+library(scd)
+library(dplyr)
+library(ggplot2)
+```
+
+## The `att_scd()` Function
+
+The main function `att_scd()` estimates period-specific ATT and constructs uniform confidence intervals.
+
+### Function Signature
+
+```{r signature, eval = FALSE}
+att_scd(
+  data,                          # Data frame with panel/cross-section data
+  yname,                         # Name of outcome variable
+  dname,                         # Name of treatment indicator (0/1)
+  tname,                         # Name of time variable (integer 1,...,T)
+  gname,                         # Name of group variable
+  gtreated,                      # Value identifying treated group
+  guntreated,                    # Vector of donor group identifiers
+  t_labels,                      # Labels for time periods
+  guntreated_labels,             # Labels for donor groups
+  idname = NULL,                 # Individual ID variable (required for panel)
+  wname = NULL,                  # Optional: survey weight variable
+  lambda = "DID",                # Differencing scheme
+  data_type = "auto",            # "auto", "panel", or "RC"
+  L = 0,                         # Post-treatment periods (0 = all available)
+  alpha = 0.05,                  # Significance level
+  kappa = 0.005,                 # Bonferroni adjustment parameter
+  length_grid_w = 500,           # Number of weight grid points
+  n_wpoints_per_edge = 20,       # Points per simplex edge
+  tolerance = 1e-06,             # Numerical tolerance for binding constraints
+  parallel = TRUE,               # Use parallel computation
+  post_treatment_only = TRUE     # Compute CIs only for post-treatment periods
+)
+```
+
+### Key Arguments
+
+#### Data Structure (`data_type`)
+
+| Value | Description |
+|-------|-------------|
+| `"auto"` | Auto-detect: panel if `idname` provided and each individual observed in every period; RC otherwise |
+| `"panel"` | Balanced panel. Requires `idname`. Uses panel variance estimator (accounts for within-individual correlation) |
+| `"RC"` | Repeated cross-sections. Uses RC variance estimator (exploits cross-period independence for sharper inference) |
+
+#### Differencing Scheme (`lambda`)
+
+The `lambda` argument controls how pre-treatment outcomes are used to construct the baseline:
+
+| Value | Formula | Description |
+|-------|---------|-------------|
+| `"DID"` | $\lambda = (0, \ldots, 0, 1)$ | Uses only the last pre-period (standard DiD) |
+| `"Unif"` | $\lambda = (1/T_0, \ldots, 1/T_0)$ | Uniform average over all pre-periods |
+| `"SC"` | $\lambda = (0, \ldots, 0)$ | No differencing (pure synthetic control) |
+| Custom | User-specified vector in $\Delta_{T_0-1}$ | Domain-specific weighting |
+
+**Guidance:** Use `"Unif"` when pre-treatment outcomes are relatively stable across time. Use `"DID"` when levels shift but slopes are stable. Use a custom vector when you have domain knowledge about which pre-periods are most informative.
+
+#### Pre-Treatment CIs (`post_treatment_only`)
+
+By default, `post_treatment_only = TRUE` and confidence intervals are computed only for post-treatment periods. Pre-treatment periods still receive point estimates ($\hat{\theta}_t$) but their CI columns will be `NA`. Set `post_treatment_only = FALSE` to compute CIs for all periods; this is useful for diagnostic pre-trend checks but increases computation time.
+
+## Example: Arizona Immigration Enforcement
+
+We analyze the effect of Arizona's Legal Arizona Workers Act (LAWA) on Hispanic workers' earnings using the included `CPSdta` dataset.
+
+### Data Preparation
+
+```{r data-prep}
+# Load the CPS data
+data("CPSdta")
+
+# Examine the data structure
+glimpse(CPSdta)
+
+# The data contains:
+# - wklyearn: log weekly earnings (outcome)
+# - D: treatment indicator (1 = Arizona post-July 2007)
+# - period: time period index
+# - statefip: state FIPS code (group identifier)
+# - weight: survey weights
+```
+
+```{r setup-groups}
+# Define the treated group
+treated <- 4  # Arizona's FIPS code
+
+# Define donor groups (all other states)
+donors <- CPSdta %>%
+  distinct(statefip, state_name) %>%
+  filter(statefip != treated) %>%
+  arrange(statefip)
+
+# Extract identifiers and labels
+guntreated <- donors$statefip
+guntreated_labels <- donors$state_name
+t_labels <- sort(unique(CPSdta$period_label))
+```
+
+### Running the Estimation
+
+```{r estimate}
+# Estimate ATT using uniform differencing with CIs for all periods
+result <- att_scd(
+  data = CPSdta,
+  yname = "wklyearn",
+  dname = "D",
+  tname = "period",
+  gname = "statefip",
+  gtreated = treated,
+  guntreated = guntreated,
+  t_labels = t_labels,
+  guntreated_labels = guntreated_labels,
+  wname = "weight",
+  lambda = "Unif",
+  data_type = "RC",
+  alpha = 0.05,
+  parallel = TRUE,
+  post_treatment_only = FALSE  # Include pre-treatment CIs for diagnostics
+)
+```
+
+### Examining Results
+
+```{r results}
+# Estimated weights on donor groups
+head(result$donorpool_weights)
+
+# Period-specific ATT estimates with confidence intervals
+result$target_parameter
+
+# Summary statistics
+cat("Data type:", result$data_type, "\n")
+cat("Sample size:", result$n, "\n")
+cat("Number of donors:", result$K, "\n")
+cat("Pre-treatment periods:", result$T_0, "\n")
+cat("Post-treatment periods:", result$T_1, "\n")
+cat("Computation time:", result$time_elapsed, "\n")
+```
+
+### Visualization
+
+```{r plot, fig.width = 8, fig.height = 5}
+# Create event study plot
+plot_att_scd(result)
+
+# With numeric x-axis instead of calendar dates
+plot_att_scd(result, date_start = NULL)
+```
+
+The plot shows:
+
+- **Blue points:** Pre-treatment ATT estimates (should be near zero under GMC)
+- **Red points:** Post-treatment ATT estimates (causal effects)
+- **Error bars:** 95% uniform confidence intervals
+
+## Advanced Usage
+
+### Comparing Differencing Schemes
+
+```{r compare-lambda}
+# DID-style differencing
+result_did <- att_scd(
+  data = CPSdta,
+  yname = "wklyearn", dname = "D", tname = "period", gname = "statefip",
+  gtreated = treated, guntreated = guntreated,
+  t_labels = t_labels, guntreated_labels = guntreated_labels,
+  wname = "weight",
+  lambda = "DID",
+  data_type = "RC"
+)
+
+# Uniform differencing
+result_unif <- att_scd(
+  data = CPSdta,
+  yname = "wklyearn", dname = "D", tname = "period", gname = "statefip",
+  gtreated = treated, guntreated = guntreated,
+  t_labels = t_labels, guntreated_labels = guntreated_labels,
+  wname = "weight",
+  lambda = "Unif",
+  data_type = "RC"
+)
+
+# Compare post-treatment confidence interval widths
+ci_width <- function(r) {
+  post <- r$target_parameter[(r$T_0 + 1):(r$T_0 + r$T_1), ]
+  mean(post$uci_hat_theta_scd - post$lci_hat_theta_scd, na.rm = TRUE)
+}
+
+cat("Mean post-treatment CI width (DID):", round(ci_width(result_did), 3), "\n")
+cat("Mean post-treatment CI width (Unif):", round(ci_width(result_unif), 3), "\n")
+```
+
+## Output Structure
+
+The `att_scd()` function returns a list with the following components:
+
+| Component | Description |
+|-----------|-------------|
+| `donorpool_weights` | Data frame with donor identifiers, labels, and estimated weights $\hat{w}$ |
+| `target_parameter` | Data frame with `period`, `hat_theta_scd`, `lci_hat_theta_scd`, `uci_hat_theta_scd` |
+| `synthetic_outcome` | Data frame with observed (`Y`) vs. synthetic (`Y_synth`) outcomes |
+| `hat_sigma` | Estimated standard errors $\hat{\sigma}_t$ for each period |
+| `n` | Total sample size (unique individuals for panel; sum of weights for RC) |
+| `K` | Number of donor groups |
+| `T_0` | Number of pre-treatment periods |
+| `T_1` | Number of post-treatment periods |
+| `T_star` | First treatment period |
+| `L` | Number of post-treatment periods used |
+| `lambda` | Differencing scheme used |
+| `data_type` | `"panel"` or `"RC"` |
+| `post_treatment_only` | Whether CIs were restricted to post-treatment |
+| `conf_set_size` | Size of weight confidence set |
+| `time_elapsed` | Computation time |
+
+## Troubleshooting
+
+### Common Issues
+
+1. **"Error: hat_Gamma_pre not full rank"**
+   - Cause: Collinearity among donor groups or too few pre-periods ($T_0 < K$)
+   - Solution: Reduce number of donors or combine similar groups
+
+2. **"Error: hat_V not positive definite"**
+   - Cause: Near-singularity in variance estimation
+   - Solution: Increase sample size or reduce number of donors
+
+3. **Empty confidence set (Bonferroni)**
+   - Cause: Grid search missed the confidence region
+   - Solution: Increase `length_grid_w` and `n_wpoints_per_edge`
+
+4. **All CIs are `NA` for pre-treatment periods**
+   - Cause: Default `post_treatment_only = TRUE` skips pre-treatment CIs
+   - Solution: Set `post_treatment_only = FALSE`
+
+5. **Slow computation**
+   - Solution: Set `parallel = TRUE`, use `post_treatment_only = TRUE` (default), or reduce `length_grid_w`
+
+## References
+
+- Rincón, R. and Song, K. (2025). "Causal Inference with Groupwise Matching." Working Paper, Vancouver School of Economics, UBC.

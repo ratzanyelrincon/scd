@@ -1,0 +1,40 @@
+Package: scd
+Type: Package
+Title: Synthetic Control with Differencing (SCD)
+Version: 0.1.0
+Authors@R: 
+    c(person(given = "Chun Pang", family = "Chow",
+             role = c("aut", "cre"),
+             email = "alexccp@student.ubc.ca"),
+      person(given = "Ratzanyel", family = "Rincon",
+             role = "aut",
+             email = "ratzanyel.rincon@ubc.ca"),
+      person(given = "Kyungchul", family = "Song",
+             role = "aut",
+             email = "kysong@mail.ubc.ca"))
+Description: Implements the SCD method for causal inference based on groupwise matching in settings with one treated and multiple untreated donor groups and short time windows, as proposed in Rincón and Song (2025). Provides estimates of average treatment effects on the treated (ATT) using SCD and valid confidence intervals using a Bonferroni approach.
+License: GPL (>= 3)
+Encoding: UTF-8
+LazyData: true
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.3
+Imports:
+    collapse (>= 2.0.0),
+    dplyr (>= 1.1.0),
+    gtools (>= 3.9.4),
+    Matrix (>= 1.6.0),
+    nloptr (>= 2.0.0),
+    osqp (>= 0.6.0),
+    parallel,
+    stats
+Suggests:
+    knitr,
+    rmarkdown,
+    testthat (>= 3.0.0),
+    ggplot2,
+    tikzDevice
+VignetteBuilder: knitr
+ByteCompile: true
+URL: https://github.com/ratzanyelrincon/scd
+Depends: 
+    R (>= 3.5)

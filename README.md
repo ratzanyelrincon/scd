@@ -1,0 +1,150 @@
+
+# Synthetic Control with Differencing (SCD)
+
+by Chun Pang Chow, Ratzanyel Rincón, and Kyungchul Song.
+
+## Description
+
+The `scd` package implements the SCD method in Rincón and Song (2025) to
+estimate the average treatment effects on the treated (ATT) and their
+asymptotically valid confidence intervals in settings with one treated
+group and multiple untreated donor groups over short panels or repeated
+cross-sections. Identification relies on a Stable Matching Condition
+(SMC), offering a robust alternative to difference-in-differences (DID)
+when the parallel trend assumption is unlikely to hold.
+
+## Installation
+
+You can install the `scd` package in `R` from Github with:
+
+``` r
+# Install devtools using: install.packages("devtools")
+devtools::install_github("ratzanyelrincon/scd")
+```
+
+## Quick Example
+
+In this example we analyze the impact of the 2007 Legal Arizona Workers
+Act (LAWA) on weekly earnings of individuals living in Arizona. The
+built-in dataset is a 5% random sample of the U.S. Current Population
+Survey (CPS) Basic Monthly Files, between January 2003 and December
+2009. The data were obtained using the `cpsR` package in `R` and include
+individual-level observations with log weekly earnings (*wklyearn*), a
+treatment dummy (*D*), time variables (*period* and *period_label*),
+state identifiers (*statefip* and *state_name*), and sampling weights
+(*weight*). Observations with non-positive weekly earnings are dropped.
+
+Following Bohn et al. (2014), we consider Arizona (*statefip* = 4) as
+treated after the passage of LAWA in July 2007 and include in the donor
+pool the other 46 states that did not implement any similar regulation
+during the period of analysis. The data structure is repeated
+cross-sections with 700 observations per month on average. You can read
+the data in `R` and have a glimpse of it as follows:
+
+``` r
+library(dplyr)
+library(scd)
+
+# Read data
+data <- CPSdta
+
+# Take a look at the first rows of the data
+head(data)
+#> # A tibble: 6 × 7
+#>   wklyearn     D period period_label statefip state_name   weight
+#>      <dbl> <dbl>  <dbl> <fct>           <dbl> <chr>         <dbl>
+#> 1     6.60     0     71 2008m11            21 Kentucky      2248.
+#> 2     7.55     0     56 2007m08            48 Texas         3986.
+#> 3     4.83     0     11 2003m11            38 North Dakota   317.
+#> 4     6.09     0     38 2006m02            55 Wisconsin     2407.
+#> 5     6.92     0     65 2008m05            38 North Dakota   336.
+#> 6     6.42     0     62 2008m02            51 Virginia      2427.
+```
+
+To prepare the data for estimating the target parameters, run:
+
+``` r
+t_labels <- sort(unique(data$period_label))
+
+treated <- 4
+
+donors <- data %>%
+  distinct(statefip, state_name) %>%
+  filter(statefip != treated) %>%
+  arrange(statefip)
+
+guntreated <- donors %>%
+  pull(statefip)
+
+guntreated_labels <- donors %>%
+  pull(state_name)
+```
+
+To estimate the average treatment effects using the DID differencing
+parameter, use the `att_scd` function as follows:
+
+``` r
+result <- att_scd(data = data,
+                  yname = "wklyearn",
+                  dname = "D",
+                  tname = "period",
+                  gname = "statefip",
+                  gtreated = treated,
+                  guntreated = guntreated,
+                  t_labels = t_labels,
+                  guntreated_labels = guntreated_labels,
+                  wname = "weight",
+                  lambda = "DID",
+                  data_type = "RC",
+                  post_treatment_only = FALSE)
+```
+
+`att_scd` returns a list of objects including the donor pool weights,
+the synthetic counterfactual for *wklyearn*, and the ATT estimates along
+with their corresponding 95% confidence intervals for each period.
+
+To control how within-group time differencing is handled in `att_scd`,
+users can adjust the parameter *lambda*. The available options are:
+“DID”, which differences outcomes relative to the last pre-treatment
+period; “Unif”, which differences outcomes relative to the average of
+all pre-treatment periods; and “SC”, which applies no time differencing
+to the outcome. A custom vector *lambda* can be provided as well.
+
+We can then create an event study plot using the function
+`plot_att_scd`:
+
+``` r
+library(ggplot2)
+
+plot_att_scd(result)
+```
+
+![](README_files/figure-gfm/unnamed-chunk-5-1.png)<!-- -->
+
+The blue and red points display the estimated average treatment effects
+on the treated in the pre- and post-treatment periods, respectively,
+together with their corresponding 95% confidence intervals. Under SMC,
+the post-LAWA estimates can be interpreted as the causal effect of the
+policy on the log weekly earnings in Arizona. Similar to the usual
+pre-trend test found in empirical studies using DID, the
+non-statistically significant estimates of the treatment effects during
+the pre-treatment period provide evidence in favour of the stability
+assumption of matching weights in SCD.
+
+## References
+
+Bohn, S., Lofstrom, M., and Raphael, S. (2014). Did the 2007 Legal
+Arizona Workers Act Reduce the State’s Unauthorized Immigrant
+Population? The Review of Economics and Statistics, 96(2), 258–269.
+<http://www.jstor.org/stable/43554929>
+
+Callaway, B., and Sant’Anna, P. H. C. (2021). Difference-in-Differences
+with Multiple Time Periods. Journal of Econometrics, 225(2), 200–230.
+<https://doi.org/10.1016/j.jeconom.2020.12.001>
+
+Rincón, R., and Song, K. (2025). Causal Inference with Groupwise
+Matching. *arXiv preprint*, arXiv:2510.26106
+<https://arxiv.org/abs/2510.26106>
+
+The technical appendix can be downloaded
+[here](https://raw.githubusercontent.com/ratzanyelrincon/scd/master/Technical_Appendix.pdf).
