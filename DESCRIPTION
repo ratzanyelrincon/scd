@@ -38,3 +38,4 @@ ByteCompile: true
 URL: https://github.com/ratzanyelrincon/scd
 Depends: 
     R (>= 3.5)
+BugReports: https://github.com/ratzanyelrincon/scd/issues
