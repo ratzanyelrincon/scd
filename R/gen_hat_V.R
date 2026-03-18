@@ -15,7 +15,7 @@
 #' @return List with all precomputed quantities
 #' @export
 precompute_panel_all <- function(w, data, hat_Gamma_pre, lambda, B2,
-                                  group_means, n_jt, K, n, T_star, T_total) {
+                                 group_means, n_jt, K, n, T_star, T_total) {
 
   T_0 <- T_star - 1
 
@@ -32,7 +32,12 @@ precompute_panel_all <- function(w, data, hat_Gamma_pre, lambda, B2,
 
   # ============================================================
   # STEP 2: Compute psi* for ALL observations - O(n)
-  # psi*_{i,t} = (n / n_{G_i,t}) * (Y_{i,t} - m_{G_i,t})
+  #
+  # TIME-VARYING WEIGHTS: absorb pi_{i,t} into the influence function:
+  #   psi*_{i,t} = pi_{i,t} * (n / n_{G_i,t}) * (Y_{i,t} - m_{G_i,t})
+  #
+  # This generalizes the constant-weight case (where pi_i factors
+  # out) and allows weights to vary across periods.
   # ============================================================
   G_vec <- data$G
   t_vec <- data$t
@@ -41,18 +46,17 @@ precompute_panel_all <- function(w, data, hat_Gamma_pre, lambda, B2,
   G_idx <- G_vec + 1L
 
   lin_idx <- G_idx + (t_vec - 1L) * (K + 1L)
-  psi_star <- (n / n_jt[lin_idx]) * (Y_vec - group_means[lin_idx])
+
+  psi_star <- wt_vec * (n / n_jt[lin_idx]) * (Y_vec - group_means[lin_idx])
 
   # ============================================================
   # STEP 3: Reshape to N x T_total matrices
   # ============================================================
   Psi_star_mat <- matrix(psi_star, nrow = N, ncol = T_total, byrow = TRUE)
-  Wt_sq_mat <- matrix(wt_vec^2, nrow = N, ncol = T_total, byrow = TRUE)
 
   # Get group for each individual (first observation per individual)
   # Data is sorted by (id, t), so individual i's first obs is at row (i-1)*T_total + 1
   G_by_id <- G_vec[seq(1L, N * T_total, by = T_total)]
-  wt_sq_ind <- Wt_sq_mat[, 1L]  # Individual weight (constant across t)
 
   # ============================================================
   # STEP 4: Compute DIFFERENCED psi for Z computation
@@ -105,10 +109,9 @@ precompute_panel_all <- function(w, data, hat_Gamma_pre, lambda, B2,
   # RETURN
   # ============================================================
   return(list(
-    Z_B2 = Z_B2,                    # N x (K-1) - using DIFFERENCED psi
-    Psi_theta_raw = Psi_theta_raw,      # N x T_total - beta_i * psi*_{i,t}
-    diff_term_theta = diff_term_theta,  # N x 1 - beta_i * sum_s lambda_s psi*_{i,s}
-    wt_sq_ind = wt_sq_ind,              # N x 1 - survey weights squared
+    Z_B2 = Z_B2,                        # N x (K-1) - using DIFFERENCED psi
+    Psi_theta_raw = Psi_theta_raw,       # N x T_total - beta_i * psi*_{i,t}
+    diff_term_theta = diff_term_theta,   # N x 1 - beta_i * sum_s lambda_s psi*_{i,s}
     N = N, K = K, n = n,
     T_0 = T_0, T_total = T_total,
     B2 = B2,
@@ -119,32 +122,30 @@ precompute_panel_all <- function(w, data, hat_Gamma_pre, lambda, B2,
 
 #' Generate hat_V for Panel Data
 #'
+#' Since pi_{i,t} is absorbed into psi*, the variance is simply:
+#'   hat_V = (1/n) * B2' (sum_i z_i z_i') B2 = (1/n) * crossprod(Z_B2)
+#'
 #' @param precomp List from precompute_panel_all
 #' @return hat_V matrix ((K-1) x (K-1))
 #' @export
 gen_hat_V_panel_fast <- function(precomp) {
-  # Z_B2 already contains B2-transformed z_i using differenced psi
-  Z_wt <- sqrt(precomp$wt_sq_ind) * precomp$Z_B2
-  return((1 / precomp$n) * crossprod(Z_wt))
+  # Z_B2 already contains pi_{i,t} inside each psi*_{i,t}
+  return((1 / precomp$n) * crossprod(precomp$Z_B2))
 }
 
 
 #' Generate hat_sigma_squared for Panel Data
 #'
-#' Formula: hat_sigma^2_t = (1/n) sum_i pi_i^2 * psi_{i,t,theta}^2
-#' where psi_{i,t,theta} = beta_i * (psi*_{i,t} - sum_s lambda_s psi*_{i,s})
+#' Since pi_{i,t} is absorbed into psi*, the variance is simply:
+#'   hat_sigma^2_t = (1/n) sum_i psi_{i,t,theta}^2
 #'
 #' @param precomp List from precompute_panel_all
 #' @return hat_sigma_squared (T_total x 1 matrix)
 #' @export
 gen_hat_sigma_squared_panel_fast <- function(precomp) {
-  # psi_{i,t,theta} = Psi_theta_raw[i,t] - diff_term_theta[i]
-  #                 = beta_i * psi*_{i,t} - beta_i * sum_s lambda_s psi*_{i,s}
-  #                 = beta_i * (psi*_{i,t} - sum_s lambda_s psi*_{i,s})
-
   Psi_theta <- precomp$Psi_theta_raw - precomp$diff_term_theta  # N x T_total
   return(matrix(
-    colSums(precomp$wt_sq_ind * Psi_theta^2) / precomp$n,
+    colSums(Psi_theta^2) / precomp$n,
     ncol = 1
   ))
 }
@@ -156,11 +157,7 @@ gen_hat_sigma_squared_panel_fast <- function(precomp) {
 
 #' Generate hat_V for Repeated Cross-Sections
 #'
-#' Formula (Line 947-948):
-#' hat_V_RC(w) = (1/T_0) sum_t { (1/n) sum_i (sum_j w_j psi*_{ij,t} - psi*_{i0,t})^2
-#'                               * B2' M_t B2 }
-#' where M_t = (1/T_0) mu_t mu_t' - lambda_t (bar_mu mu_t' + mu_t bar_mu')
-#'             + T_0 lambda_t^2 bar_mu bar_mu'
+#' Updated to absorb pi_{i,t} into the influence function for consistency.
 #'
 #' @export
 gen_hat_V_RC <- function(w, hat_Gamma_pre, data, lambda, B2, group_means, n_jt, K, n, T_star) {
@@ -176,20 +173,20 @@ gen_hat_V_RC <- function(w, hat_Gamma_pre, data, lambda, B2, group_means, n_jt, 
     G_idx <- data$G[idx_t] + 1L
     lin_idx <- G_idx + (pre_t - 1L) * (K + 1L)
 
-    # psi*_{i,t} = (n / n_{j,t}) * (Y - m_{j,t})
-    psi_star <- (n / n_jt[lin_idx]) * (data$Y[idx_t] - group_means[lin_idx])
+    # psi*_{i,t} = pi_{i,t} * (n / n_{j,t}) * (Y - m_{j,t})
+    psi_star <- data$weight[idx_t] * (n / n_jt[lin_idx]) * (data$Y[idx_t] - group_means[lin_idx])
 
     # sum_j w_j psi*_{ij,t} - psi*_{i0,t}
     psi_wt <- psi_star * weight_vec[G_idx]
 
-    # (1/n) sum_i pi_i^2 * psi_wt^2
-    hat_V_it <- sum(data$weight[idx_t]^2 * psi_wt^2) / n
+    # (1/n) sum_i psi_wt^2  (no separate pi^2 needed)
+    hat_V_it <- sum(psi_wt^2) / n
 
     # M_t matrix
     mu_t <- hat_Gamma_pre[pre_t, ]
     M_t <- (1/T_0) * tcrossprod(mu_t) -
-           lambda[pre_t] * (tcrossprod(bar_mu, mu_t) + tcrossprod(mu_t, bar_mu)) +
-           T_0 * lambda[pre_t]^2 * tcrossprod(bar_mu)
+      lambda[pre_t] * (tcrossprod(bar_mu, mu_t) + tcrossprod(mu_t, bar_mu)) +
+      T_0 * lambda[pre_t]^2 * tcrossprod(bar_mu)
 
     hat_V_sum <- hat_V_sum + hat_V_it * crossprod(B2, M_t) %*% B2
   }
@@ -199,17 +196,7 @@ gen_hat_V_RC <- function(w, hat_Gamma_pre, data, lambda, B2, group_means, n_jt, 
 
 #' Generate hat_sigma_squared for Repeated Cross-Sections
 #'
-#' For RC, individual i appears at exactly ONE time period t_i.
-#' The differenced influence function at period t for individual i at t_i is:
-#'   psi_{i,t} = (1 - lambda_{t_i}) * psi*_i   if t = t_i
-#'   psi_{i,t} = -lambda_{t_i} * psi*_i        if t != t_i (and t_i is pre-treatment)
-#'
-#' Therefore sigma_t^2 includes contributions from ALL pre-treatment individuals:
-#'   sigma_t^2 = (1/n) * [(1-lambda_t)^2 * sum_vec[t] + sum_{s!=t} lambda_s^2 * sum_vec[s]]
-#'
-#' This expands to:
-#'   sigma_t^2 = (1/n) * [total_const + (1 - 2*lambda_t) * sum_vec[t]]
-#' where total_const = sum_s lambda_s^2 * sum_vec[s]
+#' Updated to absorb pi_{i,t} into the influence function for consistency.
 #'
 #' @export
 gen_hat_sigma_squared_RC <- function(w, data, lambda, group_means, n_jt, K, n, T_star, L) {
@@ -224,27 +211,23 @@ gen_hat_sigma_squared_RC <- function(w, data, lambda, group_means, n_jt, K, n, T
   t_vals <- data$t[valid]
   lin_idx <- G_idx + (t_vals - 1L) * (K + 1L)
 
-  # psi*_{i,t} = (n / n_jt) * (Y - m)
-  psi_star <- (n / n_jt[lin_idx]) * (data$Y[valid] - group_means[lin_idx])
+  # psi*_{i,t} = pi_{i,t} * (n / n_jt) * (Y - m)
+  psi_star <- data$weight[valid] * (n / n_jt[lin_idx]) * (data$Y[valid] - group_means[lin_idx])
 
   # beta_i = 1 for treated (G=0), -w_k for donor k
   wt_mult <- ifelse(G_idx == 1L, 1, -w[G_idx - 1L])
 
   # (beta_i * psi*_{i,t})^2
   base2 <- (psi_star * wt_mult)^2
-  wt_sq <- data$weight[valid]^2
 
-  # sum_vec[t] = sum_{i in N_t} wt^2 * beta_i^2 * psi*^2
-  sum_by_t <- tapply(wt_sq * base2, t_vals, sum, default = 0)
+  # sum_vec[t] = sum_{i in N_t} beta_i^2 * psi*^2
+  sum_by_t <- tapply(base2, t_vals, sum, default = 0)
   sum_vec <- numeric(T_total)
   sum_vec[as.integer(names(sum_by_t))] <- sum_by_t
 
-  # total_const = sum_s delta_s^2 * sum_vec[s] (cross-period contributions)
-  total_const <- sum(wt_sq * base2 * delta[t_vals]^2)
+  # total_const = sum_s delta_s^2 * sum_vec[s]
+  total_const <- sum(base2 * delta[t_vals]^2)
 
   # sigma_t^2 = (1/n) * [total_const + (1 - 2*delta_t) * sum_vec[t]]
-  # which equals (1/n) * [(1-delta_t)^2 * sum_vec[t] + sum_{s!=t} delta_s^2 * sum_vec[s]]
   return(matrix((1/n) * (total_const + sum_vec * (1 - 2*delta)), ncol = 1))
 }
-
-
